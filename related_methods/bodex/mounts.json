@@ -1,0 +1,16 @@
+{
+  "image": "f2m-bodex:local",
+  "host_workspace": "E:/UM/sparse-finger-grasp-project",
+  "container_workspace": "/workspace",
+  "container_workdir": "/workspace/external/BODex",
+  "default_output_dir": "f2m_outputs",
+  "host_output_root": "E:/UM/sparse-finger-grasp-project/external/BODex/f2m_outputs",
+  "dockerfile_candidates": [
+    "external/BODex/docker/x86.dockerfile",
+    "external/BODex/docker/user.dockerfile"
+  ],
+  "notes": [
+    "This adapter is for generating or inspecting five-finger source grasps.",
+    "F2M method code should consume BODex outputs, not import BODex internals directly."
+  ]
+}

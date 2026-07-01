@@ -1,0 +1,23 @@
+{
+  "object_name": "object",
+  "robot_name": "shadowhand",
+  "urdf_path": "",
+  "robot_link_pc_path": "",
+  "object_point_cloud": "",
+  "initial_q_path": "",
+  "modes": ["5f_full", "4f_no_little", "3f_thumb_index_middle", "2f_thumb_index"],
+  "device": "cpu",
+  "output_dir": "results/gap_v2",
+  "num_patches": 25,
+  "c0_top_k": 5,
+  "c0_sigma": 0.03,
+  "link_radius": 0.08,
+  "cycles": 1,
+  "qp_iters": 4,
+  "palm_qp_iters": 1,
+  "contact_band": false,
+  "allowed_penetration": 0.007,
+  "active_objective_mode": "responsibility_gap",
+  "render": false,
+  "preview_finger": 1
+}

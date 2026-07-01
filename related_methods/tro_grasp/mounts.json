@@ -1,0 +1,12 @@
+{
+  "image": "f2m-tro-grasp:local",
+  "host_workspace": "E:/UM/sparse-finger-grasp-project",
+  "container_workspace": "/workspace",
+  "container_workdir": "/workspace/external/TRO-Grasp",
+  "default_output_dir": "/workspace/F2M/results/related_methods/tro_grasp",
+  "host_output_root": "E:/UM/sparse-finger-grasp-project/F2M/results/related_methods/tro_grasp",
+  "notes": [
+    "Run from repository root as Docker build context.",
+    "This config is only for the external TRO-Grasp method; F2M local code does not import TRO Python files."
+  ]
+}
