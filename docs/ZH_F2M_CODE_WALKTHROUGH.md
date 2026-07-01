@@ -122,7 +122,25 @@ A_{i,k}(q)=\exp(-d_{i,k}^2/\sigma^2)\alpha_{i,k}
 
 - `method/graph_utils.py::build_link_patch_graph`
 
-注意：这里不是直接求真实接触力，也不是二值 contact，而是用几何 proximity + normal consistency 建一个责任代理图。它服务于“五指到少指”的责任差距优化。
+当前 v2 对 link surface point \(y\) 和 patch \(k=(x_k,n_k)\) 使用接触/穿深饱和 affinity：
+
+\[
+s=n_k^\top(y-x_k)
+\]
+
+\[
+a(y,k)=
+\begin{cases}
+1, & s\le d_{\text{contact}}\ \text{and}\ \|y-x_k\|\le r_{\text{contact}}\\
+\exp(-\|y-x_k\|^2/\sigma^2), & \text{otherwise}
+\end{cases}
+\]
+
+也就是说，如果 link surface sample 已经进入或接近某个 patch 的局部邻域，就认为这个 link 对该 patch 形成满覆盖责任；如果还没接触，就按欧氏距离衰减。
+
+这里 \(d_{\text{contact}}\) 可以取小正数，例如 1-2 mm，表示近接触也算满覆盖。\(r_{\text{contact}}\) 是局部半径，用来避免“在同一切平面但离 patch 很远”的点被误判成覆盖这个 patch。
+
+注意：深穿不会在 responsibility 里继续加分，只是饱和到 1；深穿的坏处由后面的 hand-object collision penalty 处理。这里不是直接求真实接触力，也不是二值 contact，而是用 link surface 对 object patch 的几何覆盖建立责任代理图。
 
 ### 2.4 Finger responsibility
 
