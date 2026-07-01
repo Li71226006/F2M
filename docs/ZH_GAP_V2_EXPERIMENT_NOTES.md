@@ -114,14 +114,52 @@ conda run -n lerobot2 python scripts\evaluate_gap_v2.py `
 1. 代码路径是通的，`lerobot2` 可以跑。
 2. affinity 的接触/穿深饱和已经接入，穿深和近接触不会被距离项反向惩罚成低 affinity。
 3. 当前 v2 理论表达更符合“少指责任分布逼近五指责任分布”，但数值效果还不稳定。
-4. `self_retention_after` 几乎总是 1，说明当前 self-retention 指标太宽松；由于 patch kernel 扩散后很容易覆盖自身责任，它没有真正约束住“别丢掉自己的责任”。
-5. `battery / 2f_thumb_index` 是最明显失败样本：v2 的 target kernel gain 为 0，需要重点 debug。
+4. 初版 `self_retention_after` 几乎总是 1，说明 kernel-diffused self-retention 太宽松；后续 v2b 已改成 raw patch-level retention。
+5. 初版 `battery / 2f_thumb_index` 是最明显失败样本：v2 的 target kernel gain 为 0；v2b 通过弱几何方向项把它修到非零改进，但仍低于 baseline。
+
+## v2b 更新
+
+v2b 改动：
+
+- `self_retention` 改成 raw patch-level，不再用 compensation kernel 扩散后的 coverage。
+- responsibility-gap QP 增加弱几何方向项：从当前 positive gap 中选少量 reachable patch，作为 soft objective 给手指一个移动方向，但不作为硬约束。
+- 新增参数：
+  - `responsibility_direction_weight = 30.0`
+  - `responsibility_direction_targets = 2`
+
+v2b 批量输出：
+
+- `results/gap_v2b_batch/<object>/<mode>/stats.json`
+- `results/gap_v2b_metric_compare.csv`
+- `results/gap_v2b_metric_compare_pivot.csv`
+
+按 `target_kernel_gain`，v2b 相比 baseline 赢了 5/12：
+
+| Object | Mode | target baseline | target v2b | self baseline | self v2b | Winner |
+| --- | --- | ---: | ---: | ---: | ---: | --- |
+| battery | 4f_no_little | 0.177 | 0.161 | 0.977 | 0.938 | baseline |
+| battery | 3f_thumb_index_middle | 1.583 | 1.546 | 0.900 | 0.893 | baseline |
+| battery | 2f_thumb_index | 1.432 | 1.294 | 0.970 | 0.970 | baseline |
+| mouse | 4f_no_little | 1.914 | 0.891 | 0.960 | 0.963 | baseline |
+| mouse | 3f_thumb_index_middle | 4.200 | 4.319 | 0.930 | 0.925 | v2b |
+| mouse | 2f_thumb_index | 3.414 | 3.383 | 0.887 | 0.887 | baseline |
+| rubiks | 4f_no_little | 1.284 | 1.373 | 0.985 | 0.917 | v2b |
+| rubiks | 3f_thumb_index_middle | 1.584 | 1.610 | 0.902 | 0.902 | v2b |
+| rubiks | 2f_thumb_index | 1.567 | 1.567 | 0.963 | 0.963 | tie |
+| sodacan | 4f_no_little | 2.943 | 1.027 | 0.968 | 0.982 | baseline |
+| sodacan | 3f_thumb_index_middle | 1.369 | 1.566 | 0.991 | 0.996 | v2b |
+| sodacan | 2f_thumb_index | 3.412 | 3.832 | 0.993 | 0.993 | v2b |
 
 ## 下一步
 
-建议先不要扩大到更多物体，而是先调方法本身：
+已完成：
 
-1. 把 acceptance guard 统一改成 `target_kernel_gap`，不要混用旧 residual。
-2. 重新设计 self-retention：不要只看 kernel-diffused coverage，可以增加 per-finger raw responsibility retention 或局部 patch retention。
-3. 给 responsibility-gap QP 增加一个弱几何方向项，避免 finite-difference responsibility Jacobian 太弱时完全不动。
-4. 在 `battery / 2f_thumb_index` 和 `mouse / 3f_thumb_index_middle` 上做小网格调参，再扩展更多小物体。
+1. acceptance guard 已以 `target_kernel_gap` 为 active-finger v2 接受条件。
+2. self-retention 已改成 raw responsibility retention。
+3. responsibility-gap QP 已增加弱几何方向项。
+
+仍建议继续：
+
+1. 对 `responsibility_direction_weight` 和 `responsibility_self_weight` 做小网格调参。
+2. 对 `mouse / 4f_no_little`、`sodacan / 4f_no_little` 这类 v2b 退化 case 单独渲染检查。
+3. 如果要写论文主结果，建议把 baseline、v2、v2b 同时放进 ablation，而不是只报 v2b。

@@ -62,7 +62,7 @@ from .responsibility_gap import (
     compensated_coverage,
     finite_difference_finger_responsibility_jacobian,
     positive_gap,
-    self_retention_ratio,
+    raw_self_retention_ratio,
     target_responsibility,
 )
 from .robot_processor import RobotProcessor
@@ -262,6 +262,7 @@ def solve_single_finger_responsibility_gap_qp(
     last_gap_before = None
     last_gap_linearized = None
     last_self_before = None
+    last_direction_targets = 0
     for _ in range(args.qp_iters):
         current_c, _, _, _ = compute_finger_responsibility(hand, q_current, patch_positions, patch_normals, args)
         active_total = current_c[active_rows].sum(axis=0) if active_rows else np.zeros(patch_positions.shape[0])
@@ -284,10 +285,10 @@ def solve_single_finger_responsibility_gap_qp(
                 "objective_mode": "responsibility_gap",
             }
         gap_jac = patch_kernel.T @ jac_finger
-        self_base = compensated_coverage(base_finger, patch_kernel)
-        self_jac = patch_kernel.T @ jac_finger
+        self_base = base_finger
+        self_jac = jac_finger
         self_target = full_c[finger_idx].astype(np.float64)
-        self_before = self_retention_ratio(base_finger, self_target, patch_kernel)
+        self_before = raw_self_retention_ratio(base_finger, self_target)
 
         status = hand.pk_chain.forward_kinematics(q_current)
         q_np = q_current.detach().cpu().numpy().astype(np.float64)
@@ -310,6 +311,43 @@ def solve_single_finger_responsibility_gap_qp(
             gap_slack >= target - linear_comp,
             self_slack >= self_target - linear_self,
         ]
+        direction_targets = []
+        if args.responsibility_direction_weight > 0.0:
+            direction_targets = select_targets_for_finger(
+                hand,
+                q_current,
+                finger_idx,
+                gap_before,
+                patch_positions,
+                patch_normals,
+                args,
+            )[: args.responsibility_direction_targets]
+            if direction_targets:
+                link_names = sorted({target.link_name for target in direction_targets})
+                direction_jacs = jacobian(hand.pk_chain, q_current, status, link_names)
+                for direction_target in direction_targets:
+                    linearized = closest_surface_point_linearization(
+                        hand,
+                        q_current,
+                        status,
+                        direction_jacs,
+                        direction_target.link_name,
+                        direction_target.target,
+                        direction_target.candidate_name,
+                        args.target_surface_points,
+                        args,
+                    )
+                    if linearized is None:
+                        continue
+                    point_xyz, point_jac = linearized
+                    weight = args.responsibility_direction_weight * max(
+                        direction_target.weight,
+                        args.min_target_weight,
+                    )
+                    objective_terms.append(
+                        weight * cp.sum_squares(point_xyz + point_jac @ dq - direction_target.target)
+                    )
+        last_direction_targets = len(direction_targets)
         add_surface_collision_constraints(
             hand,
             q_current,
@@ -372,10 +410,11 @@ def solve_single_finger_responsibility_gap_qp(
             break
 
     final_c, _, _, _ = compute_finger_responsibility(hand, q_current, patch_positions, patch_normals, args)
-    final_self = self_retention_ratio(final_c[finger_idx], full_c[finger_idx], patch_kernel)
+    final_self = raw_self_retention_ratio(final_c[finger_idx], full_c[finger_idx])
     return q_current.detach(), {
         "finger": FINGER_NAMES[finger_idx],
         "num_targets": 0,
+        "num_direction_targets": last_direction_targets,
         "status": last_status,
         "last_objective": last_value,
         "objective_mode": "responsibility_gap",

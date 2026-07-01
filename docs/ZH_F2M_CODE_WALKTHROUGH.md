@@ -421,17 +421,32 @@ e\ge T-\hat R^r(q)-K^\top G_f\Delta q_f,\quad e\ge0
 E_{self}
 =
 \left\|
-\max(0,A_f^5-K^\top A_f(q+\Delta q_f))
+\max(0,A_f^5-A_f(q+\Delta q_f))
 \right\|^2
 \]
 
-所以 v2 active finger QP 是：
+注意这里 v2b 使用 raw patch-level self-retention，不再用 \(K^\top A_f\)。原因是 \(K\) 会把相邻 patch 的覆盖扩散过来，容易让 self-retention 看起来保持了，但手指自己的局部责任其实已经掉了。
+
+v2b 还加了一个弱几何方向项：
+
+\[
+E_{dir}
+=
+\sum_{m\in\mathcal D_f}
+w_m\|y_m(q)+J_m\Delta q_f-z_m\|^2
+\]
+
+其中 \(\mathcal D_f\) 是从当前 positive responsibility gap 中选出的少量 reachable patch。这个项只是 soft objective，用来在 finite-difference responsibility Jacobian 很弱时给手指一个方向；它不是硬性指定某个 link 必须接某个 patch。
+
+所以 v2b active finger QP 是：
 
 \[
 \min_{\Delta q_f}
 E_{gap}
 +
 \lambda_{self}E_{self}
++
+\lambda_{dir}E_{dir}
 +
 E_{anchor}
 +

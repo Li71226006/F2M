@@ -31,6 +31,7 @@ from method.responsibility_gap import (
     active_nonthumb_rows,
     build_patch_compensation_kernel,
     compensated_coverage,
+    raw_self_retention_ratio,
     target_responsibility,
 )
 from method.sequential_qp import SequentialQP
@@ -91,11 +92,7 @@ def coverage_metrics(runner: SequentialQP, q: torch.Tensor, finger_mask: list[in
     disabled_kernel_gap = np.maximum(0.0, disabled - compensated)
     target_kernel_gap = np.maximum(0.0, target - compensated)
 
-    active_full_mass = float(active_full.sum())
-    if active_full_mass <= 1e-12:
-        self_retention = 1.0
-    else:
-        self_retention = float(np.minimum(compensated, active_full).sum() / (active_full_mass + 1e-12))
+    self_retention = raw_self_retention_ratio(active_current, active_full)
 
     target_mass = float(target.sum())
     disabled_mass = float(disabled.sum())

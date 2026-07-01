@@ -219,6 +219,8 @@ def build_solver_args(config: CFETConfig) -> Namespace:
         "responsibility_fd_eps": 2e-3,
         "responsibility_gap_weight": 40.0,
         "responsibility_self_weight": 8.0,
+        "responsibility_direction_weight": 30.0,
+        "responsibility_direction_targets": 2,
         "responsibility_min_self_retention": 0.65,
         "stats_points_per_link": 96,
         "near_distance": 0.012,

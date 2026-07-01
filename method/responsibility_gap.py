@@ -124,3 +124,17 @@ def self_retention_ratio(current_finger: np.ndarray, full_finger: np.ndarray, ke
     current_comp = compensated_coverage(current_finger, kernel)
     retained = np.minimum(current_comp, full_finger).sum()
     return float(retained / (target_mass + 1e-12))
+
+
+def raw_self_retention_ratio(current_finger: np.ndarray, full_finger: np.ndarray) -> float:
+    """Patch-local retention without compensation-kernel diffusion.
+
+    This stricter metric prevents a finger from losing its own patch-level role
+    while appearing acceptable only because nearby patches diffuse through K.
+    """
+
+    target_mass = float(np.sum(full_finger))
+    if target_mass <= 1e-12:
+        return 1.0
+    retained = np.minimum(current_finger, full_finger).sum()
+    return float(retained / (target_mass + 1e-12))
