@@ -318,9 +318,21 @@ Cost(h,k)
 
 ## 3. Part B 公式：QP 怎么动关节
 
-### 3.0 v2：直接优化责任缺口，而不是强制追点
+### 3.0 推荐主线和实验分支
 
-当前保留了旧的 point-tracking QP，同时新增了一个可选 v2：
+当前推荐作为论文主方法和主要实验结果的是：
+
+```json
+"active_objective_mode": "point_tracking"
+```
+
+对应配置：
+
+- `configs/cfet_default.json`
+
+也就是前面 2.6/2.7 描述的 **greedy residual-to-correspondence assignment + 多假设单指 QP**。这条路线把责任缺口先变成少数可执行 target，然后由当前手指的 distal/middle/proximal 候选部位去追踪；它不是硬接触约束，而是带 collision/self-collision/acceptance guard 的软几何优化。根据目前已经跑过的 BODex 小物体 sweep，它比后续两个更“理论化”的实验分支更稳，因此当前最适合作为主方法。
+
+另外保留了一个可选 v2 实验分支：
 
 ```json
 "active_objective_mode": "responsibility_gap"
@@ -329,6 +341,7 @@ Cost(h,k)
 配置文件：
 
 - `configs/cfet_gap_v2.json`
+- `configs/cfet_candidate_pool_v5.json` 是另一个候选池匹配实验分支
 
 v2 的核心变化是：
 
@@ -463,11 +476,11 @@ E_{safe}
 - `method/sequential_qp.py::solve_single_finger_responsibility_gap_qp`
 - `method/sequential_qp.py::sequential_qp_refine`
 
-这版更符合“五指生成少指”的核心目标：不是追踪离散 target 点，而是让少指的新姿态产生与目标责任相似的责任分布。
+这版在理论表述上更贴近“五指生成少指”的核心目标：不是追踪离散 target 点，而是让少指的新姿态产生与目标责任相似的责任分布。但当前数值效果没有稳定超过 point-tracking 主线，所以建议在论文中把它写成 ablation / future work，而不是主方法。
 
 ### 3.1 单根手指 QP
 
-以下是旧的 point-tracking QP，仍保留作为 baseline / fallback。
+以下是当前推荐主线使用的 point-tracking QP。
 
 上一节选出来的 `FingerTarget` 还不是运动结果。真正去追踪目标点 \(z_m\) 的，是 finger \(f\) 上被选中的 link \(L_i\) 的一个 surface point。
 
