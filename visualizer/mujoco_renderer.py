@@ -6,7 +6,6 @@ from pathlib import Path
 
 import numpy as np
 import trimesh
-from PIL import Image, ImageDraw
 
 
 FINGER_NAMES = ["thumb", "index", "middle", "ring", "little"]
@@ -53,15 +52,20 @@ class MujocoRenderer:
             near = stats.get("after", {}).get("near_ratio")
             pen = stats.get("after", {}).get("max_penetration_mm")
             residual = stats.get("final_residual_mass")
-            thumb_file = stats_path.parent / f"{mode}.png"
-            if thumb_file.exists():
-                thumb = f'<img src="{html.escape(mode)}/{html.escape(mode)}.png" alt="{html.escape(mode)} preview" />'
+            glb_file = stats_path.parent / f"{mode}.glb"
+            if glb_file.exists():
+                preview = (
+                    f'<model-viewer src="{html.escape(mode)}/{html.escape(mode)}.glb" '
+                    'camera-controls auto-rotate shadow-intensity="0.65" '
+                    'exposure="1.05" tone-mapping="neutral" camera-orbit="115deg 72deg 0.28m" '
+                    'field-of-view="35deg" interaction-prompt="none"></model-viewer>'
+                )
             else:
-                thumb = '<div class="no-preview">no preview image</div>'
+                preview = '<div class="no-preview">no GLB preview</div>'
             cards.append(
                 f"""<article>
   <a class="mode-card" href="interactive_viewer.html?mode={html.escape(mode)}">
-    {thumb}
+    {preview}
     <h2>{html.escape(MODE_TITLES.get(mode, mode))}</h2>
     <dl>
       <div><dt>near ratio</dt><dd>{self._fmt(near)}</dd></div>
@@ -108,15 +112,7 @@ class MujocoRenderer:
         output_dir.mkdir(parents=True, exist_ok=True)
         mode = output_dir.name
         object_points = object_pc_normals[:, :3].detach().cpu().numpy()
-        before_points = self._hand_points(hand, q_before)
-        after_points = self._hand_points(hand, q_after)
         self._write_glb(hand, q_after, object_points, output_dir / f"{mode}.glb", mode)
-
-        # Kept for backward compatibility with old reports. The main viewer no
-        # longer uses this 2D projection as the primary visualization.
-        image = self._render_projection(object_points, before_points, after_points)
-        image.save(output_dir / f"{mode}.png")
-        image.save(output_dir / f"{mode}.gif", save_all=True, append_images=[image], duration=700, loop=0)
         (output_dir / f"{mode}_stats.json").write_text(self._json(stats), encoding="utf-8")
 
         path = output_dir / "preview.html"
@@ -192,38 +188,6 @@ class MujocoRenderer:
             scene.add_geometry(object_cloud, geom_name="object_pc")
         path.write_bytes(scene.export(file_type="glb"))
 
-    @staticmethod
-    def _render_projection(object_points: np.ndarray, before_points: np.ndarray, after_points: np.ndarray) -> Image.Image:
-        width, height = 960, 640
-        canvas = Image.new("RGB", (width, height), "#f8fafc")
-        draw = ImageDraw.Draw(canvas)
-        draw.text((24, 18), "legacy preview only: steel object, gray before, muted after", fill="#1f2933")
-        if not (len(object_points) and len(before_points) and len(after_points)):
-            return canvas
-
-        points = np.concatenate([object_points[:, :2], before_points[:, :2], after_points[:, :2]], axis=0)
-        mins = points.min(axis=0)
-        maxs = points.max(axis=0)
-        span = np.maximum(maxs - mins, 1e-6)
-
-        def project(arr: np.ndarray) -> np.ndarray:
-            xy = (arr[:, :2] - mins[None, :]) / span[None, :]
-            out = np.empty_like(xy)
-            out[:, 0] = 44 + xy[:, 0] * (width - 88)
-            out[:, 1] = height - 44 - xy[:, 1] * (height - 108)
-            return out
-
-        obj_xy = project(object_points[:: max(1, len(object_points) // 500)])
-        before_xy = project(before_points[:: max(1, len(before_points) // 900)])
-        after_xy = project(after_points[:: max(1, len(after_points) // 900)])
-        for x, y in obj_xy:
-            draw.ellipse((x - 2, y - 2, x + 2, y + 2), fill="#607f9e")
-        for x, y in before_xy:
-            draw.ellipse((x - 1, y - 1, x + 1, y + 1), fill="#8b949e")
-        for x, y in after_xy:
-            draw.ellipse((x - 1.4, y - 1.4, x + 1.4, y + 1.4), fill="#a85c4e")
-        return canvas
-
     def _write_interactive_viewer(self, root: Path) -> None:
         modes = []
         buttons = []
@@ -260,16 +224,14 @@ class MujocoRenderer:
   <model-viewer src="{src}.glb" camera-controls auto-rotate shadow-intensity="0.65"
     exposure="1.05" tone-mapping="neutral" camera-orbit="115deg 72deg 0.28m"
     field-of-view="35deg" interaction-prompt="none"></model-viewer>
-  <img class="viewer-fallback" src="{src}.png" alt="{html.escape(mode)} preview" />
   <aside>
-    <img src="{src}.png" alt="{html.escape(mode)} still" />
     <dl>
       <div><dt>active near</dt><dd>{self._fmt(near)}</dd></div>
       <div><dt>disabled near</dt><dd>{self._fmt(disabled)}</dd></div>
       <div><dt>max penetration</dt><dd>{self._fmt(pen)} mm</dd></div>
       <div><dt>residual</dt><dd>{self._fmt(residual)}</dd></div>
     </dl>
-    <a href="{src}.gif">GIF</a>
+    <a href="{src}.glb">Download GLB</a>
     <pre>{stats_json}</pre>
   </aside>
 </section>"""
@@ -356,6 +318,7 @@ class MujocoRenderer:
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>{html.escape(title)}</title>
+  <script type="module" src="https://unpkg.com/@google/model-viewer/dist/model-viewer.min.js"></script>
   <style>
     :root {{ color-scheme: light; }}
     body {{ margin: 0; font-family: Inter, "Microsoft YaHei", Segoe UI, Arial, sans-serif; background: #edf2f7; color: #1f2933; }}
@@ -365,7 +328,7 @@ class MujocoRenderer:
     main {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 18px; padding: 18px; }}
     article {{ background: #ffffff; border: 1px solid #d8e0e8; overflow: hidden; }}
     .mode-card {{ display: block; color: inherit; text-decoration: none; }}
-    img {{ display: block; width: 100%; height: 230px; object-fit: contain; background: linear-gradient(#e9f1f8, #ffffff); border-bottom: 1px solid #d8e0e8; }}
+    model-viewer {{ display: block; width: 100%; height: 230px; background: linear-gradient(#e9f1f8, #ffffff); border-bottom: 1px solid #d8e0e8; }}
     .no-preview {{ display: grid; place-items: center; height: 230px; color: #667280; background: linear-gradient(#e9f1f8, #ffffff); border-bottom: 1px solid #d8e0e8; }}
     h2 {{ margin: 14px 14px 12px; font-size: 17px; }}
     dl {{ display: grid; gap: 8px; margin: 0 14px 16px; }}
@@ -398,11 +361,7 @@ class MujocoRenderer:
     .panel {{ display: none; height: 100%; grid-template-columns: 1fr 330px; }}
     .panel.active {{ display: grid; }}
     model-viewer {{ width: 100%; height: 100%; background: linear-gradient(#e9f1f8, #ffffff); }}
-    .viewer-fallback {{ display: none; width: 100%; height: 100%; object-fit: contain; background: linear-gradient(#e9f1f8, #ffffff); }}
-    .no-model-viewer model-viewer {{ display: none; }}
-    .no-model-viewer .viewer-fallback {{ display: block; }}
     aside {{ padding: 16px; background: #f8fafc; border-left: 1px solid #d8e0e8; overflow: auto; }}
-    img {{ width: 100%; border: 1px solid #d8e0e8; background: white; }}
     dl {{ display: grid; gap: 10px; margin: 14px 0; }}
     dt {{ font-size: 12px; color: #667280; }}
     dd {{ margin: 2px 0 0; font-size: 16px; font-weight: 650; }}
@@ -413,7 +372,7 @@ class MujocoRenderer:
       header {{ align-items: flex-start; flex-wrap: wrap; padding: 12px; }}
       main {{ height: auto; min-height: calc(100vh - 82px); }}
       .panel.active {{ display: block; }}
-      model-viewer, .viewer-fallback {{ height: 62vh; min-height: 360px; }}
+      model-viewer {{ height: 62vh; min-height: 360px; }}
       aside {{ border-left: 0; border-top: 1px solid #d8e0e8; }}
     }}
   </style>
@@ -435,16 +394,6 @@ class MujocoRenderer:
     for (const button of buttons) {{
       button.addEventListener('click', () => selectMode(button.dataset.mode));
     }}
-    for (const viewer of document.querySelectorAll('model-viewer')) {{
-      viewer.addEventListener('error', () => {{
-        document.documentElement.classList.add('no-model-viewer');
-      }});
-    }}
-    setTimeout(() => {{
-      if (!customElements.get('model-viewer')) {{
-        document.documentElement.classList.add('no-model-viewer');
-      }}
-    }}, 1500);
     if (panels.length) selectMode(queryMode);
   </script>
 </body>

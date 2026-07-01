@@ -1449,7 +1449,6 @@ class SequentialQP:
         )
 
         still_path = None
-        gif_path = None
         if self.config.render:
             renderer = MujocoRenderer(str(root), title=f"F2M {self.config.object_name}")
             renderer.export_scene_preview(self.robot.hand, q_start, self.object_pc_normals, mode_dir, name="before")
@@ -1469,7 +1468,6 @@ class SequentialQP:
             ),
             "sequence": sequence,
             "still_path": still_path,
-            "gif_path": gif_path,
         }
         save_json(mode_dir / "stats.json", stats)
         if self.config.render:
