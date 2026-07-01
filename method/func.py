@@ -146,7 +146,7 @@ def build_solver_args(config: CFETConfig) -> Namespace:
         "surface_collision_k": 12,
         "surface_collision_margin": 0.012,
         "allowed_penetration": config.allowed_penetration,
-        "collision_slack_weight": 20000.0,
+        "collision_slack_weight": 80000.0,
         "contact_band": config.contact_band,
         "contact_band_link_scope": "distal_middle",
         "contact_band_points": 64,
