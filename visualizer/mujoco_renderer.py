@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -45,6 +46,7 @@ class MujocoRenderer:
 
     def make_index(self) -> None:
         root = self._root()
+        self._ensure_viewer_assets(root)
         cards = []
         for stats_path in sorted(root.glob("*/stats.json")):
             mode = stats_path.parent.name
@@ -145,6 +147,14 @@ class MujocoRenderer:
         import json
 
         return json.dumps(payload, indent=2, ensure_ascii=False)
+
+    @staticmethod
+    def _ensure_viewer_assets(root: Path) -> None:
+        assets = root / "assets"
+        assets.mkdir(parents=True, exist_ok=True)
+        source = Path(__file__).resolve().parent / "vendor" / "model-viewer.min.js"
+        if source.exists():
+            shutil.copy2(source, assets / "model-viewer.min.js")
 
     @staticmethod
     def _fmt(value) -> str:
@@ -318,7 +328,7 @@ class MujocoRenderer:
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>{html.escape(title)}</title>
-  <script type="module" src="https://unpkg.com/@google/model-viewer/dist/model-viewer.min.js"></script>
+  <script type="module" src="assets/model-viewer.min.js"></script>
   <style>
     :root {{ color-scheme: light; }}
     body {{ margin: 0; font-family: Inter, "Microsoft YaHei", Segoe UI, Arial, sans-serif; background: #edf2f7; color: #1f2933; }}
@@ -350,7 +360,7 @@ class MujocoRenderer:
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>{html.escape(title)}</title>
-  <script type="module" src="https://unpkg.com/@google/model-viewer/dist/model-viewer.min.js"></script>
+  <script type="module" src="assets/model-viewer.min.js"></script>
   <style>
     body {{ margin: 0; font-family: Inter, "Microsoft YaHei", Segoe UI, Arial, sans-serif; background: #edf2f7; color: #1f2933; }}
     header {{ min-height: 58px; display: flex; align-items: center; gap: 10px; padding: 0 18px; background: #f8fafc; border-bottom: 1px solid #d8e0e8; }}
