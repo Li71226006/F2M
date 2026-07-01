@@ -55,6 +55,8 @@ class FingerTarget:
     target: np.ndarray
     candidate_name: str = "nearest"
     contact_part: str = "auto"
+    region_size: int = 1
+    region_weight: float = 0.0
 
 
 
@@ -416,6 +418,153 @@ def choose_semantic_target_link(
 
 
 
+def residual_regions(
+    residual: np.ndarray,
+    patch_positions: np.ndarray,
+    patch_normals: np.ndarray,
+    args: argparse.Namespace,
+) -> list[dict]:
+    """Group high-residual patches into small local contact regions.
+
+    This keeps the old Top-NMS spirit, but each selected item represents a
+    weighted neighborhood instead of one isolated patch.
+    """
+
+    scores = np.maximum(0.0, residual).astype(np.float64)
+    selected = []
+    suppressed = np.zeros_like(scores, dtype=bool)
+    max_regions = int(getattr(args, "residual_regions_per_finger", args.targets_per_finger))
+    min_weight = float(getattr(args, "min_target_weight", 0.0))
+    cluster_radius = float(getattr(args, "residual_region_radius", args.nms_radius))
+
+    for _ in range(max_regions):
+        current = scores.copy()
+        current[suppressed] = -1.0
+        center_idx = int(np.argmax(current))
+        if current[center_idx] <= min_weight:
+            break
+        dist = np.linalg.norm(patch_positions - patch_positions[center_idx], axis=1)
+        members = np.where((dist <= cluster_radius) & (scores > 0.0))[0]
+        if members.size == 0:
+            members = np.asarray([center_idx], dtype=int)
+        weights = scores[members]
+        total = float(weights.sum())
+        if total <= min_weight:
+            suppressed[center_idx] = True
+            continue
+        center = (weights[:, None] * patch_positions[members]).sum(axis=0) / (total + 1e-12)
+        normal = (weights[:, None] * patch_normals[members]).sum(axis=0)
+        normal_norm = np.linalg.norm(normal)
+        if normal_norm < 1e-8:
+            normal = patch_normals[center_idx]
+        else:
+            normal = normal / normal_norm
+        rep_idx = int(members[int(np.argmax(weights))])
+        selected.append(
+            {
+                "patch_idx": rep_idx,
+                "weight": total,
+                "position": center.astype(np.float64),
+                "normal": normal.astype(np.float64),
+                "size": int(members.size),
+            }
+        )
+        suppressed |= dist < args.nms_radius
+    return selected
+
+
+def select_targets_from_candidate_pool(
+    hand,
+    q: torch.Tensor,
+    finger_idx: int,
+    residual: np.ndarray,
+    patch_positions: np.ndarray,
+    patch_normals: np.ndarray,
+    args: argparse.Namespace,
+    contact_part: str | None = None,
+) -> list[FingerTarget]:
+    """Match this finger's pad candidate pool to residual contact regions."""
+
+    status = hand.pk_chain.forward_kinematics(q)
+    if contact_part:
+        links = [name for name in allowed_contact_part_links(finger_idx, contact_part) if name in status]
+    else:
+        links = [name for name in allowed_target_links(finger_idx, args.target_link_scope) if name in status]
+    if not links:
+        return []
+
+    regions = residual_regions(residual, patch_positions, patch_normals, args)
+    if not regions:
+        return []
+
+    region_positions = np.stack([region["position"] for region in regions], axis=0)
+    region_normals = np.stack([region["normal"] for region in regions], axis=0)
+    if args.target_contact_candidate_mode == "nearest":
+        dist = surface_distances_for_links(hand, q, links, region_positions, args.target_surface_points)
+        candidate_names = np.full(dist.shape, "nearest", dtype=object)
+    else:
+        dist, candidate_names = candidate_distances_for_links(
+            hand,
+            q,
+            links,
+            region_positions,
+            region_normals,
+            args,
+        )
+
+    hypotheses = []
+    for region_idx, region in enumerate(regions):
+        region_weight = float(region["weight"])
+        for link_idx, link_name in enumerate(links):
+            distance = float(dist[link_idx, region_idx])
+            if not np.isfinite(distance):
+                continue
+            if contact_part:
+                part = contact_part
+            elif link_name.endswith("distal"):
+                part = "distal"
+            elif link_name.endswith("middle"):
+                part = "middle"
+            else:
+                part = "proximal"
+            prior = contact_part_prior(part if part in {"distal", "middle", "proximal"} else "auto", args)
+            reach = math.exp(-(distance**2) / (args.target_reach_sigma**2))
+            score = region_weight * reach * prior
+            hypotheses.append((score, region_idx, link_idx, part))
+
+    hypotheses.sort(key=lambda item: item[0], reverse=True)
+    targets: list[FingerTarget] = []
+    used_regions: set[int] = set()
+    used_link_region: set[tuple[int, int]] = set()
+    for score, region_idx, link_idx, part in hypotheses:
+        if score <= args.min_target_weight:
+            break
+        if not getattr(args, "candidate_pool_allow_multi_link_region", False) and region_idx in used_regions:
+            continue
+        key = (link_idx, region_idx)
+        if key in used_link_region:
+            continue
+        region = regions[region_idx]
+        targets.append(
+            FingerTarget(
+                finger_idx=finger_idx,
+                link_name=links[link_idx],
+                patch_idx=int(region["patch_idx"]),
+                weight=float(score),
+                target=region["position"] + args.target_gap * region["normal"],
+                candidate_name=str(candidate_names[link_idx, region_idx]),
+                contact_part=part,
+                region_size=int(region["size"]),
+                region_weight=float(region["weight"]),
+            )
+        )
+        used_regions.add(region_idx)
+        used_link_region.add(key)
+        if len(targets) >= args.targets_per_finger:
+            break
+    return targets
+
+
 def select_targets_for_finger(
     hand,
     q: torch.Tensor,
@@ -436,6 +585,18 @@ def select_targets_for_finger(
     and each chosen patch is assigned to a concrete link/candidate surface
     point. The QP later tracks target = patch_center + target_gap * normal.
     """
+
+    if getattr(args, "target_assignment_mode", "legacy_nms") == "candidate_pool":
+        return select_targets_from_candidate_pool(
+            hand,
+            q,
+            finger_idx,
+            residual,
+            patch_positions,
+            patch_normals,
+            args,
+            contact_part=contact_part,
+        )
 
     status = hand.pk_chain.forward_kinematics(q)
     if contact_part:

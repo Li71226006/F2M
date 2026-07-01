@@ -263,6 +263,10 @@ def solve_single_finger_responsibility_gap_qp(
     last_gap_linearized = None
     last_self_before = None
     last_direction_targets = 0
+    last_direction_target_links: list[str] = []
+    last_direction_target_candidates: list[str] = []
+    last_direction_target_parts: list[str] = []
+    last_direction_target_region_sizes: list[int] = []
     last_wrench_before = None
     last_wrench_linearized = None
     patch_wrenches = patch_wrench_matrix(patch_positions, patch_normals)
@@ -378,6 +382,10 @@ def solve_single_finger_responsibility_gap_qp(
                         weight * cp.sum_squares(point_xyz + point_jac @ dq - direction_target.target)
                     )
         last_direction_targets = len(direction_targets)
+        last_direction_target_links = [target.link_name for target in direction_targets]
+        last_direction_target_candidates = [target.candidate_name for target in direction_targets]
+        last_direction_target_parts = [target.contact_part for target in direction_targets]
+        last_direction_target_region_sizes = [target.region_size for target in direction_targets]
         add_surface_collision_constraints(
             hand,
             q_current,
@@ -455,6 +463,10 @@ def solve_single_finger_responsibility_gap_qp(
         "gap_predicted_sum": last_gap_linearized,
         "self_retention_before": last_self_before,
         "self_retention_after": final_self,
+        "direction_target_links": last_direction_target_links,
+        "direction_target_candidates": last_direction_target_candidates,
+        "direction_target_parts": last_direction_target_parts,
+        "direction_target_region_sizes": last_direction_target_region_sizes,
         "wrench_before_scaled": last_wrench_before,
         "wrench_predicted_scaled": last_wrench_linearized,
     }

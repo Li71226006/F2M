@@ -37,6 +37,10 @@ class CFETConfig:
     contact_band: bool = False
     allowed_penetration: float = 0.003
     active_objective_mode: str = "point_tracking"
+    target_assignment_mode: str = "legacy_nms"
+    residual_regions_per_finger: int = 4
+    residual_region_radius: float = 0.024
+    candidate_pool_allow_multi_link_region: bool = False
 
     render: bool = False
     preview_finger: int = 1
