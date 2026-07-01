@@ -228,28 +228,50 @@ def add_self_collision_constraints(
 ) -> None:
     """Keep the moving finger at least self_collision_min_distance from others.
 
-    Other active fingers are treated as fixed obstacle point clouds in this QP
-    step. The distance to the nearest obstacle point is linearized along the
-    separating direction.
+    Only collisions relevant to the moving reduced hand are checked. For a
+    moving non-thumb finger, the obstacles are the active thumb and palm. For a
+    moving thumb, the obstacles are the active non-thumb fingers and palm.
     """
 
     if not args.self_collision:
         return
 
-    active_obstacle_fingers = [
-        idx
-        for idx, enabled in enumerate(finger_mask)
-        if enabled and idx != finger_idx and (idx != 0 or args.self_collision_include_thumb)
-    ]
-    if not active_obstacle_fingers:
-        return
+    active_obstacle_fingers: list[int]
+    if finger_idx == 0:
+        active_obstacle_fingers = [
+            idx for idx, enabled in enumerate(finger_mask) if enabled and idx != 0
+        ]
+    else:
+        active_obstacle_fingers = [0] if finger_mask[0] and args.self_collision_include_thumb else []
 
-    obstacle_points = sampled_finger_points(
-        hand,
-        q,
-        active_obstacle_fingers,
-        args.self_collision_points,
-    )
+    obstacle_chunks = []
+    if active_obstacle_fingers:
+        obstacle_chunks.append(
+            sampled_finger_points(
+                hand,
+                q,
+                active_obstacle_fingers,
+                args.self_collision_points,
+            )
+        )
+
+    palm_links = [
+        name
+        for name in getattr(args, "self_collision_palm_links", [])
+        if name in status and name in hand.links_pc
+    ]
+    for palm_link in palm_links:
+        local_pc = sample_points(hand.links_pc[palm_link].to(q.device), args.self_collision_points)
+        if local_pc.numel() == 0:
+            continue
+        se3 = status[palm_link].get_matrix()[0].to(q.device)
+        ones = torch.ones(local_pc.shape[0], 1, dtype=local_pc.dtype, device=q.device)
+        obstacle_chunks.append((torch.cat([local_pc, ones], dim=1) @ se3.T)[:, :3])
+
+    obstacle_chunks = [chunk for chunk in obstacle_chunks if chunk.numel() > 0]
+    if not obstacle_chunks:
+        return
+    obstacle_points = torch.cat(obstacle_chunks, dim=0)
     if obstacle_points.numel() == 0:
         return
 

@@ -25,6 +25,28 @@ def scalar(value):
     return arr.tolist()
 
 
+def add_readable_metrics(row: dict) -> None:
+    """Add human-readable aliases while keeping raw DexGraspBench keys."""
+
+    if "succ_flag" in row:
+        row["sim_success"] = row["succ_flag"]
+    if "delta_pos" in row:
+        row["sim_delta_pos_m"] = row["delta_pos"]
+        row["sim_delta_pos_mm"] = float(row["delta_pos"]) * 1000.0
+    if "delta_angle" in row:
+        row["sim_delta_angle_deg"] = row["delta_angle"]
+    if "ho_pene" in row:
+        row["ho_pene_mm"] = float(row["ho_pene"]) * 1000.0
+    if "self_pene" in row:
+        row["self_pene_mm"] = float(row["self_pene"]) * 1000.0
+    if "contact_dist" in row:
+        row["contact_dist_mm"] = float(row["contact_dist"]) * 1000.0
+    if "delta_pos" in row and "delta_angle" in row:
+        row["filtered_by_initial_penetration"] = (
+            float(row["delta_pos"]) >= 99.0 and float(row["delta_angle"]) >= 99.0
+        )
+
+
 def main() -> None:
     args = parse_args()
     rows = []
@@ -42,11 +64,38 @@ def main() -> None:
             if key.endswith("_qpos") or key in {"obj_pose", "obj_path"}:
                 continue
             row[key] = scalar(value)
+        add_readable_metrics(row)
         rows.append(row)
 
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
-    fieldnames = sorted({key for row in rows for key in row.keys()})
+    preferred = [
+        "object",
+        "mode",
+        "file",
+        "sim_success",
+        "succ_flag",
+        "filtered_by_initial_penetration",
+        "sim_delta_pos_m",
+        "sim_delta_pos_mm",
+        "sim_delta_angle_deg",
+        "ho_pene",
+        "ho_pene_mm",
+        "self_pene",
+        "self_pene_mm",
+        "contact_num",
+        "contact_dist",
+        "contact_dist_mm",
+        "contact_consis",
+        "qp_metric",
+        "qp_dfc_metric",
+        "dfc_metric",
+        "tdg_metric",
+        "q1_metric",
+    ]
+    keys = {key for row in rows for key in row.keys()}
+    fieldnames = [key for key in preferred if key in keys]
+    fieldnames.extend(sorted(keys - set(fieldnames)))
     with output.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()

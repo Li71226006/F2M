@@ -35,7 +35,7 @@ class CFETConfig:
     qp_iters: int = 4
     palm_qp_iters: int = 1
     contact_band: bool = False
-    allowed_penetration: float = 0.007
+    allowed_penetration: float = 0.003
     active_objective_mode: str = "point_tracking"
 
     render: bool = False

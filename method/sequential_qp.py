@@ -234,7 +234,7 @@ def solve_single_finger_responsibility_gap_qp(
 
         min || positive_part(T - K^T R_active(q + dq_f)) ||^2
 
-    plus self-retention, anchor, step, and safety terms.
+    plus self-retention, a wrench-balance proxy, anchor, step, and safety terms.
     """
 
     device = q.device
@@ -263,6 +263,9 @@ def solve_single_finger_responsibility_gap_qp(
     last_gap_linearized = None
     last_self_before = None
     last_direction_targets = 0
+    last_wrench_before = None
+    last_wrench_linearized = None
+    patch_wrenches = patch_wrench_matrix(patch_positions, patch_normals)
     for _ in range(args.qp_iters):
         current_c, _, _, _ = compute_finger_responsibility(hand, q_current, patch_positions, patch_normals, args)
         active_total = current_c[active_rows].sum(axis=0) if active_rows else np.zeros(patch_positions.shape[0])
@@ -290,6 +293,26 @@ def solve_single_finger_responsibility_gap_qp(
         self_target = full_c[finger_idx].astype(np.float64)
         self_before = raw_self_retention_ratio(base_finger, self_target)
 
+        if args.responsibility_wrench_weight > 0.0:
+            wrench_rows = [idx for idx, enabled in enumerate(finger_mask) if enabled]
+            wrench_weights = (
+                current_c[wrench_rows].sum(axis=0)
+                if wrench_rows
+                else np.zeros(patch_positions.shape[0], dtype=np.float64)
+            )
+            wrench_mass = max(float(wrench_weights.sum()), 1e-8)
+            base_wrench = (wrench_weights @ patch_wrenches) / wrench_mass
+            wrench_jac = (patch_wrenches.T @ jac_finger) / wrench_mass
+            wrench_scale = np.asarray(
+                [1.0, 1.0, 1.0, args.responsibility_wrench_torque_scale,
+                 args.responsibility_wrench_torque_scale, args.responsibility_wrench_torque_scale],
+                dtype=np.float64,
+            )
+        else:
+            base_wrench = None
+            wrench_jac = None
+            wrench_scale = None
+
         status = hand.pk_chain.forward_kinematics(q_current)
         q_np = q_current.detach().cpu().numpy().astype(np.float64)
         dq = cp.Variable(n)
@@ -311,6 +334,13 @@ def solve_single_finger_responsibility_gap_qp(
             gap_slack >= target - linear_comp,
             self_slack >= self_target - linear_self,
         ]
+        if base_wrench is not None and wrench_jac is not None and wrench_scale is not None:
+            linear_wrench = base_wrench + wrench_jac @ dq[fd_joints]
+            objective_terms.append(
+                args.responsibility_wrench_weight
+                * cp.sum_squares(cp.multiply(wrench_scale, linear_wrench))
+            )
+            last_wrench_before = float(np.linalg.norm(wrench_scale * base_wrench))
         direction_targets = []
         if args.responsibility_direction_weight > 0.0:
             direction_targets = select_targets_for_finger(
@@ -404,6 +434,9 @@ def solve_single_finger_responsibility_gap_qp(
         delta_np = np.asarray(dq.value, dtype=np.float64)
         predicted_comp = base_comp + gap_jac @ delta_np[fd_joints]
         last_gap_linearized = float(np.maximum(0.0, target - predicted_comp).sum())
+        if base_wrench is not None and wrench_jac is not None and wrench_scale is not None:
+            predicted_wrench = base_wrench + wrench_jac @ delta_np[fd_joints]
+            last_wrench_linearized = float(np.linalg.norm(wrench_scale * predicted_wrench))
         delta = torch.as_tensor(delta_np, dtype=q_current.dtype, device=device)
         q_current = q_current + args.line_search * delta
         if float(delta[finger_joints].norm().detach().cpu()) < args.converge_delta:
@@ -422,6 +455,8 @@ def solve_single_finger_responsibility_gap_qp(
         "gap_predicted_sum": last_gap_linearized,
         "self_retention_before": last_self_before,
         "self_retention_after": final_self,
+        "wrench_before_scaled": last_wrench_before,
+        "wrench_predicted_scaled": last_wrench_linearized,
     }
 
 def palm_joint_indices(hand, include_wrist: bool = False) -> np.ndarray:
@@ -457,14 +492,20 @@ def accept_candidate_step(
     residual_gain = before_residual - after_residual
     near_gain = after_stats["near_ratio"] - before_stats["near_ratio"]
     penetration_worsen = after_stats["max_penetration_mm"] - before_stats["max_penetration_mm"]
+    penetration_guard_ok = accept_penetration_guard(
+        before_stats,
+        after_stats,
+        args.accept_max_penetration_worsen_mm,
+        args,
+    )
     residual_ok = (
         residual_gain >= args.accept_residual_gain
-        and penetration_worsen <= args.accept_max_penetration_worsen_mm
+        and penetration_guard_ok
         and near_gain >= -args.accept_near_drop
     )
     near_ok = (
         near_gain >= args.accept_near_gain
-        and penetration_worsen <= args.accept_max_penetration_worsen_mm
+        and penetration_guard_ok
     )
     penetration_ok = (
         penetration_worsen <= -args.accept_penetration_gain_mm
@@ -492,11 +533,28 @@ def accept_candidate_step(
     )
     finger_dominant_ok = (
         finger_distance_gain >= args.accept_finger_distance_gain_mm
-        and penetration_worsen <= args.accept_max_penetration_worsen_mm
+        and penetration_guard_ok
         and near_gain >= -args.accept_contact_near_drop
         and after_residual <= before_residual + args.accept_residual_worsen
     )
     return (global_ok and finger_ok) or finger_dominant_ok
+
+def accept_penetration_guard(
+    before_stats: dict,
+    after_stats: dict,
+    max_worsen_mm: float,
+    args: argparse.Namespace,
+) -> bool:
+    """Reject steps that worsen already excessive hand-object penetration."""
+
+    before_max = float(before_stats["max_penetration_mm"])
+    after_max = float(after_stats["max_penetration_mm"])
+    limit = float(args.accept_max_total_penetration_mm)
+    if after_max <= limit:
+        return after_max - before_max <= max_worsen_mm
+    if before_max > limit:
+        return after_max <= before_max + args.accept_penetration_over_limit_worsen_mm
+    return False
 
 def accept_thumb_step(
     before_stats: dict,
@@ -536,7 +594,12 @@ def accept_thumb_step(
     )
     opposition_ok = opposition_gain >= args.thumb_accept_opposition_gain
     wrench_ok = wrench_gain >= args.thumb_accept_wrench_gain
-    penetration_ok = penetration_worsen <= args.thumb_accept_max_penetration_worsen_mm
+    penetration_ok = accept_penetration_guard(
+        before_stats,
+        after_stats,
+        args.thumb_accept_max_penetration_worsen_mm,
+        args,
+    )
     return penetration_ok and (contact_ok or opposition_ok or wrench_ok)
 
 def accept_palm_step(
@@ -551,7 +614,12 @@ def accept_palm_step(
     penetration_worsen = after_stats["max_penetration_mm"] - before_stats["max_penetration_mm"]
     near_gain = after_stats["near_ratio"] - before_stats["near_ratio"]
     wrench_gain = before_wrench["wrench_norm"] - after_wrench["wrench_norm"]
-    penetration_ok = penetration_worsen <= args.palm_accept_max_penetration_worsen_mm
+    penetration_ok = accept_penetration_guard(
+        before_stats,
+        after_stats,
+        args.palm_accept_max_penetration_worsen_mm,
+        args,
+    )
     return penetration_ok and (
         near_gain >= args.palm_accept_near_gain
         or wrench_gain >= args.palm_accept_wrench_gain
@@ -871,16 +939,35 @@ def sequential_qp_refine(
             patch_normals,
             args,
         )
-        after_stats = reduced_penetration_stats(
+        after_global_stats = reduced_penetration_stats(
             hand,
             q_candidate,
             object_pc_normals,
             finger_mask,
             args,
         )
+        before_accept_stats = before_stats
+        after_accept_stats = after_global_stats
+        penetration_scope = "active_hand"
         before_finger_gap = None
         after_finger_gap = None
         if moving_finger_idx is not None:
+            moving_mask = [1 if idx == moving_finger_idx else 0 for idx in range(len(FINGER_NAMES))]
+            before_accept_stats = reduced_penetration_stats(
+                hand,
+                q_before_step,
+                object_pc_normals,
+                moving_mask,
+                args,
+            )
+            after_accept_stats = reduced_penetration_stats(
+                hand,
+                q_candidate,
+                object_pc_normals,
+                moving_mask,
+                args,
+            )
+            penetration_scope = FINGER_NAMES[moving_finger_idx]
             before_finger_gap = single_finger_gap_stats(
                 hand,
                 q_before_step,
@@ -935,11 +1022,16 @@ def sequential_qp_refine(
             after_self = step_info.get("self_retention_after")
             self_floor = min(args.responsibility_min_self_retention, before_self if before_self is not None else 1.0)
             self_ok = after_self is None or after_self >= self_floor - 0.05
-            penetration_worsen = after_stats["max_penetration_mm"] - before_stats["max_penetration_mm"]
+            penetration_guard_ok = accept_penetration_guard(
+                before_accept_stats,
+                after_accept_stats,
+                args.accept_max_penetration_worsen_mm,
+                args,
+            )
             accepted = (
                 after_gap_kernel <= before_gap_kernel + args.accept_residual_worsen
                 and self_ok
-                and penetration_worsen <= args.accept_max_penetration_worsen_mm
+                and penetration_guard_ok
             )
             step_info.update(
                 {
@@ -947,6 +1039,7 @@ def sequential_qp_refine(
                     "gap_kernel_after": after_gap_kernel,
                     "gap_kernel_gain": before_gap_kernel - after_gap_kernel,
                     "self_retention_guard_ok": self_ok,
+                    "penetration_guard_ok": penetration_guard_ok,
                 }
             )
         elif phase_name == "thumb":
@@ -967,8 +1060,8 @@ def sequential_qp_refine(
                 args,
             )
             accepted = accept_thumb_step(
-                before_stats,
-                after_stats,
+                before_accept_stats,
+                after_accept_stats,
                 before_finger_gap or {},
                 after_finger_gap or {},
                 before_opposition,
@@ -979,8 +1072,8 @@ def sequential_qp_refine(
             )
         elif phase_name == "palm":
             accepted = accept_palm_step(
-                before_stats,
-                after_stats,
+                before_accept_stats,
+                after_accept_stats,
                 before_wrench,
                 after_wrench,
                 args,
@@ -989,22 +1082,38 @@ def sequential_qp_refine(
             accepted = accept_candidate_step(
                 before_residual,
                 after_residual,
-                before_stats,
-                after_stats,
+                before_accept_stats,
+                after_accept_stats,
                 args,
                 before_finger_gap,
                 after_finger_gap,
             )
         if accepted:
             q_next = q_candidate
+            after_stats = after_global_stats
         else:
             q_next = q_before_step
+            candidate_residual = after_residual
+            candidate_global_stats = after_global_stats
+            candidate_accept_stats = after_accept_stats
+            candidate_finger_gap = after_finger_gap
+            candidate_wrench = after_wrench
+            candidate_opposition = after_opposition
             after_residual = before_residual
             after_stats = before_stats
+            after_accept_stats = before_accept_stats
             after_finger_gap = before_finger_gap
             after_wrench = before_wrench
             after_opposition = before_opposition
             step_info["status"] = f"{step_info.get('status')}_rejected"
+            step_info["candidate_residual_after"] = candidate_residual
+            step_info["candidate_global_max_penetration_after_mm"] = candidate_global_stats["max_penetration_mm"]
+            step_info["candidate_global_near_after"] = candidate_global_stats["near_ratio"]
+            step_info["candidate_acceptance_max_penetration_after_mm"] = candidate_accept_stats["max_penetration_mm"]
+            step_info["candidate_acceptance_near_after"] = candidate_accept_stats["near_ratio"]
+            step_info["candidate_moving_finger_gap_after"] = candidate_finger_gap
+            step_info["candidate_wrench_after"] = candidate_wrench
+            step_info["candidate_thumb_opposition_after"] = candidate_opposition
         responsibility_before = responsibility_consistency_stats(
             before_residual,
             disabled_responsibility,
@@ -1023,10 +1132,15 @@ def sequential_qp_refine(
                 "responsibility_coverage_before": responsibility_before["coverage_ratio"],
                 "responsibility_coverage_after": responsibility_after["coverage_ratio"],
                 "accepted": accepted,
-                "near_before": before_stats["near_ratio"],
-                "near_after": after_stats["near_ratio"],
-                "max_penetration_before_mm": before_stats["max_penetration_mm"],
-                "max_penetration_after_mm": after_stats["max_penetration_mm"],
+                "penetration_scope": penetration_scope,
+                "near_before": before_accept_stats["near_ratio"],
+                "near_after": after_accept_stats["near_ratio"],
+                "max_penetration_before_mm": before_accept_stats["max_penetration_mm"],
+                "max_penetration_after_mm": after_accept_stats["max_penetration_mm"],
+                "global_near_before": before_stats["near_ratio"],
+                "global_near_after": after_stats["near_ratio"],
+                "global_max_penetration_before_mm": before_stats["max_penetration_mm"],
+                "global_max_penetration_after_mm": after_stats["max_penetration_mm"],
                 "moving_finger": FINGER_NAMES[moving_finger_idx] if moving_finger_idx is not None else None,
                 "moving_finger_gap_before": before_finger_gap,
                 "moving_finger_gap_after": after_finger_gap,
@@ -1095,6 +1209,14 @@ def sequential_qp_refine(
             finger_idx,
             args,
         )
+        finger_only_mask = [1 if idx == finger_idx else 0 for idx in range(len(FINGER_NAMES))]
+        before_finger_stats = reduced_penetration_stats(
+            hand,
+            q_before_step,
+            object_pc_normals,
+            finger_only_mask,
+            args,
+        )
         before_wrench = wrench_balance_stats(
             hand,
             q_before_step,
@@ -1137,11 +1259,18 @@ def sequential_qp_refine(
                 patch_normals,
                 args,
             )
-            after_stats = reduced_penetration_stats(
+            after_global_stats = reduced_penetration_stats(
                 hand,
                 q_candidate,
                 object_pc_normals,
                 finger_mask,
+                args,
+            )
+            after_finger_stats = reduced_penetration_stats(
+                hand,
+                q_candidate,
+                object_pc_normals,
+                finger_only_mask,
                 args,
             )
             after_finger_gap = single_finger_gap_stats(
@@ -1163,8 +1292,8 @@ def sequential_qp_refine(
             would_accept = accept_candidate_step(
                 before_residual,
                 after_residual,
-                before_stats,
-                after_stats,
+                before_finger_stats,
+                after_finger_stats,
                 args,
                 before_finger_gap,
                 after_finger_gap,
@@ -1176,8 +1305,8 @@ def sequential_qp_refine(
                 finger_idx,
                 before_residual,
                 after_residual,
-                before_stats,
-                after_stats,
+                before_finger_stats,
+                after_finger_stats,
                 before_finger_gap,
                 after_finger_gap,
                 before_wrench,
@@ -1191,8 +1320,11 @@ def sequential_qp_refine(
                     "hypothesis_score": score,
                     "hypothesis_would_accept": would_accept,
                     "hypothesis_residual_after": after_residual,
-                    "hypothesis_near_after": after_stats["near_ratio"],
-                    "hypothesis_max_penetration_after_mm": after_stats["max_penetration_mm"],
+                    "hypothesis_penetration_scope": FINGER_NAMES[finger_idx],
+                    "hypothesis_near_after": after_finger_stats["near_ratio"],
+                    "hypothesis_max_penetration_after_mm": after_finger_stats["max_penetration_mm"],
+                    "hypothesis_global_near_after": after_global_stats["near_ratio"],
+                    "hypothesis_global_max_penetration_after_mm": after_global_stats["max_penetration_mm"],
                     "hypothesis_moving_finger_gap_after": after_finger_gap,
                     "hypothesis_wrench_before": before_wrench,
                     "hypothesis_wrench_after": after_wrench,
