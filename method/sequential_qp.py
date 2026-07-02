@@ -22,7 +22,7 @@ import numpy as np
 import torch
 
 from .config import CFETConfig
-from .constants import FINGER_NAMES
+from .constants import FINGER_NAMES, SHADOWHAND_FINGER_LINK_MAP
 from .contact_targets import (
     FingerTarget,
     active_contact_centroid,
@@ -91,7 +91,8 @@ def solve_single_finger_qp(
     near-surface band, and self-collision.
     """
 
-    if not targets and not args.contact_band:
+    thumb_cleanup = finger_idx == 0 and not targets and not args.thumb_contact_targets
+    if not targets and not args.contact_band and not thumb_cleanup:
         return q, {"finger": FINGER_NAMES[finger_idx], "num_targets": 0, "status": "no_targets"}
 
     device = q.device
@@ -109,6 +110,13 @@ def solve_single_finger_qp(
     for _ in range(args.qp_iters):
         status = hand.pk_chain.forward_kinematics(q_current)
         link_names = sorted({target.link_name for target in targets})
+        if thumb_cleanup:
+            thumb_links = [
+                name
+                for name in SHADOWHAND_FINGER_LINK_MAP[0]
+                if name in status and name in hand.links_pc
+            ]
+            link_names = sorted(set(link_names).union(thumb_links))
         jacs = jacobian(hand.pk_chain, q_current, status, link_names)
         q_np = q_current.detach().cpu().numpy().astype(np.float64)
         q_ref_np = q_ref.detach().cpu().numpy().astype(np.float64)
@@ -116,11 +124,16 @@ def solve_single_finger_qp(
         dq = cp.Variable(n)
         # Full-size dq keeps Jacobian code simple; equality constraints freeze
         # every joint outside the current finger.
-        objective_terms = [args.step_weight * cp.sum_squares(dq)]
+        max_step = args.thumb_cleanup_max_step if thumb_cleanup else args.max_step
+        line_search = args.thumb_cleanup_line_search if thumb_cleanup else args.line_search
+        step_weight = args.thumb_cleanup_step_weight if thumb_cleanup else args.step_weight
+        anchor_weight = args.thumb_cleanup_anchor_weight if thumb_cleanup else args.joint_anchor_weight
+
+        objective_terms = [step_weight * cp.sum_squares(dq)]
         constraints = [
             dq[frozen] == 0.0,
-            dq[finger_joints] <= np.minimum(args.max_step, upper[finger_joints] - q_np[finger_joints]),
-            dq[finger_joints] >= np.maximum(-args.max_step, lower[finger_joints] - q_np[finger_joints]),
+            dq[finger_joints] <= np.minimum(max_step, upper[finger_joints] - q_np[finger_joints]),
+            dq[finger_joints] >= np.maximum(-max_step, lower[finger_joints] - q_np[finger_joints]),
         ]
 
         for target in targets:
@@ -141,8 +154,43 @@ def solve_single_finger_qp(
             weight = args.contact_weight * max(target.weight, args.min_target_weight)
             objective_terms.append(weight * cp.sum_squares(point_xyz + point_jac @ dq - target.target))
 
+        if thumb_cleanup:
+            object_pc = object_pc_normals[:, :3].to(device)
+            normals = object_pc_normals[:, 3:].to(device)
+            for link_name in link_names:
+                if link_name not in SHADOWHAND_FINGER_LINK_MAP[0]:
+                    continue
+                local_pc = hand.links_pc[link_name].to(device)
+                local_pc = sample_points(local_pc, args.thumb_cleanup_points_per_link)
+                se3 = status[link_name].get_matrix()[0].to(device)
+                ones = torch.ones(local_pc.shape[0], 1, dtype=local_pc.dtype, device=device)
+                world_pc = (torch.cat([local_pc, ones], dim=1) @ se3.T)[:, :3]
+                signed, _ = signed_distances(world_pc, object_pc, normals)
+                violation = args.allowed_penetration - signed
+                keep = min(args.thumb_cleanup_k, int(violation.numel()))
+                if keep <= 0:
+                    continue
+                candidate_idx = torch.topk(violation, keep, largest=True).indices
+                link_jac = jacs[link_name][0].detach().cpu().numpy().astype(np.float64)
+                for point_idx in candidate_idx.detach().cpu().tolist():
+                    phi = float(signed[point_idx].detach().cpu())
+                    if phi >= args.allowed_penetration:
+                        continue
+                    point_xyz_t = world_pc[point_idx]
+                    distances = torch.cdist(point_xyz_t[None, None, :], object_pc[None, :, :])[0, 0]
+                    nearest_idx = int(torch.argmin(distances).detach().cpu())
+                    normal = normals[nearest_idx].detach().cpu().numpy().astype(np.float64)
+                    point_xyz = point_xyz_t.detach().cpu().numpy().astype(np.float64)
+                    point_jac = point_jacobian_from_link(se3, link_jac, point_xyz)
+                    push = min(args.thumb_cleanup_max_push, max(0.0, args.allowed_penetration - phi))
+                    target_xyz = point_xyz + push * normal
+                    objective_terms.append(
+                        args.thumb_cleanup_push_weight
+                        * cp.sum_squares(point_xyz + point_jac @ dq - target_xyz)
+                    )
+
         objective_terms.append(
-            args.joint_anchor_weight
+            anchor_weight
             * cp.sum_squares(q_np[finger_joints] + dq[finger_joints] - q_ref_np[finger_joints])
         )
         add_surface_collision_constraints(
@@ -197,7 +245,7 @@ def solve_single_finger_qp(
             break
 
         delta = torch.as_tensor(dq.value, dtype=q_current.dtype, device=device)
-        q_current = q_current + args.line_search * delta
+        q_current = q_current + line_search * delta
         if float(delta[finger_joints].norm().detach().cpu()) < args.converge_delta:
             break
 
@@ -210,6 +258,7 @@ def solve_single_finger_qp(
         "target_links": [target.link_name for target in targets],
         "target_candidates": [target.candidate_name for target in targets],
         "target_contact_parts": [target.contact_part for target in targets],
+        "thumb_cleanup": thumb_cleanup,
     }
 
 def solve_single_finger_responsibility_gap_qp(
@@ -586,6 +635,7 @@ def accept_thumb_step(
     """
 
     penetration_worsen = after_stats["max_penetration_mm"] - before_stats["max_penetration_mm"]
+    penetration_gain = -penetration_worsen
     before_min = before_finger_gap.get("min_unsigned_mm", float("inf")) if before_finger_gap else float("inf")
     after_min = after_finger_gap.get("min_unsigned_mm", float("inf")) if after_finger_gap else float("inf")
     distance_gain = before_min - after_min
@@ -596,6 +646,12 @@ def accept_thumb_step(
     )
     opposition_gain = after_opposition["alignment"] - before_opposition["alignment"]
     wrench_gain = before_wrench["wrench_norm"] - after_wrench["wrench_norm"]
+    if not args.thumb_contact_targets:
+        return (
+            penetration_gain >= args.thumb_cleanup_accept_penetration_gain_mm
+            and near_gain >= -args.thumb_cleanup_accept_near_drop
+            and after_min <= before_min + args.thumb_cleanup_accept_distance_worsen_mm
+        )
     contact_ok = (
         distance_gain >= args.thumb_accept_distance_gain_mm
         or near_gain >= args.thumb_accept_near_gain
@@ -901,7 +957,7 @@ def sequential_qp_refine(
     object_pc_normals: torch.Tensor,
     args: argparse.Namespace,
 ) -> tuple[torch.Tensor, dict]:
-    """Run the complete active-finger -> thumb -> palm sequence.
+    """Run the active-finger sequence plus optional conservative support cleanup.
 
     Pseudocode:
         q = sparse start from q_full
@@ -910,8 +966,8 @@ def sequential_qp_refine(
                 recompute R_res(q)
                 solve distal/middle/proximal hypotheses
                 accept or reject best candidate
-            solve thumb support QP
-            solve palm/wrist prealignment QP
+            optionally solve conservative thumb penetration cleanup
+            optionally solve palm/wrist prealignment QP
     """
 
     q = q_start.detach().clone()
@@ -923,6 +979,11 @@ def sequential_qp_refine(
         }
     order = ordered_active_nonthumb(finger_mask)
     history = []
+    phase_order = ["active_fingers"]
+    if args.thumb_phase and finger_mask[0]:
+        phase_order.append("thumb_cleanup" if not args.thumb_contact_targets else "thumb")
+    if args.palm_phase:
+        phase_order.append("palm")
     patch_kernel = build_patch_compensation_kernel(
         patch_positions,
         patch_normals,
@@ -1515,7 +1576,7 @@ def sequential_qp_refine(
     final_residual = np.maximum(0.0, disabled_responsibility - final_c[active_rows].sum(axis=0))
     return q, {
         "finger_order": [FINGER_NAMES[idx] for idx in order],
-        "phase_order": ["active_fingers", "thumb", "palm"],
+        "phase_order": phase_order,
         "history": history,
         "final_residual_mass": float(final_residual.sum()),
     }
