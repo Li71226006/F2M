@@ -22,6 +22,6 @@
   "residual_regions_per_finger": 4,
   "residual_region_radius": 0.024,
   "candidate_pool_allow_multi_link_region": false,
-  "render": false,
+  "render": true,
   "preview_finger": 1
 }

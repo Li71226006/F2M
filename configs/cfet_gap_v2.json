@@ -18,6 +18,6 @@
   "contact_band": false,
   "allowed_penetration": 0.003,
   "active_objective_mode": "responsibility_gap",
-  "render": false,
+  "render": true,
   "preview_finger": 1
 }

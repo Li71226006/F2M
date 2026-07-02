@@ -42,7 +42,7 @@ class CFETConfig:
     residual_region_radius: float = 0.024
     candidate_pool_allow_multi_link_region: bool = False
 
-    render: bool = False
+    render: bool = True
     preview_finger: int = 1
 
     @classmethod

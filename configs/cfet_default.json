@@ -17,6 +17,6 @@
   "palm_qp_iters": 1,
   "contact_band": false,
   "allowed_penetration": 0.003,
-  "render": false,
+  "render": true,
   "preview_finger": 1
 }

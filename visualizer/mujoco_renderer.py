@@ -25,7 +25,7 @@ MODE_TITLES = {
 
 LINK_COLORS = {
     # Muted, paper-friendly colors: distinct parts without a saturated demo look.
-    "object": np.array([96, 128, 158, 180], dtype=np.uint8),
+    "object": np.array([72, 96, 116, 255], dtype=np.uint8),
     "thumb": np.array([168, 92, 78, 255], dtype=np.uint8),
     "index": np.array([76, 118, 158, 255], dtype=np.uint8),
     "middle": np.array([86, 140, 128, 255], dtype=np.uint8),
@@ -189,9 +189,17 @@ class MujocoRenderer:
         )
         try:
             object_mesh = object_cloud.convex_hull
-            object_mesh.visual = trimesh.visual.ColorVisuals(
-                mesh=object_mesh,
-                face_colors=np.tile(LINK_COLORS["object"][None, :], (len(object_mesh.faces), 1)),
+            # Keep the object visually solid in model-viewer. A transparent or
+            # ghosted object makes penetration/contact inspection misleading.
+            object_mesh.visual = trimesh.visual.TextureVisuals(
+                material=trimesh.visual.material.PBRMaterial(
+                    baseColorFactor=(LINK_COLORS["object"] / 255.0).tolist(),
+                    metallicFactor=0.0,
+                    roughnessFactor=0.72,
+                    alphaMode="OPAQUE",
+                    doubleSided=True,
+                    name="opaque_object",
+                )
             )
             scene.add_geometry(object_mesh, geom_name="object_hull")
         except Exception:
